@@ -12,7 +12,7 @@ function DRIVER(L, PARSE, VISF, VIEW_H, SAFE) {
   var seq = 0, held = [], V = VISF(VIEW_H), keepSvg = false;
   function before(a, b) { return a.key < b.key || (a.key === b.key && a.seq < b.seq); }
   return {
-    init: function (seed, dbg) { Math.seed(seed); keepSvg = !!dbg; L.MEM.chunks = []; L.MEM.xmin = 0; L.MEM.xmax = 0; L.MEM.planmtx = []; held = []; },
+    init: function (seed, dbg, night) { if (L.setNight) L.setNight(night); Math.seed(seed); keepSvg = !!dbg; L.MEM.chunks = []; L.MEM.xmin = 0; L.MEM.xmax = 0; L.MEM.planmtx = []; held = []; },
     gen: function () {
       var M = L.MEM;
       M.chunks = [];
@@ -52,6 +52,7 @@ function DRIVER(L, PARSE, VISF, VIEW_H, SAFE) {
           var c = 247 + L.Noise.noise(i * 0.1, j * 0.1) * 8;
           c -= Math.random() * 12;
           var r = Math.round(c), g = Math.round(c * 0.985), b = Math.round(c * 0.955);
+          if (L.isNight && L.isNight()) { var d = c - 247; r = Math.round(21 + d * 0.5); g = Math.round(27 + d * 0.55); b = Math.round(49 + d * 0.8); }
           put(i, j, r, g, b); put(reso - i, j, r, g, b); put(i, reso - j, r, g, b); put(reso - i, reso - j, r, g, b);
         }
       return { r: px, t: [px.buffer] };
@@ -101,7 +102,7 @@ function DRIVER(L, PARSE, VISF, VIEW_H, SAFE) {
   measure();
   window.addEventListener("resize", measure);
 
-  var DEBUG = false, S, brushes = [], speedMult = 1, paused = false, showNames = false, time = 0;
+  var DEBUG = false, NIGHT = false, S, brushes = [], speedMult = 1, paused = false, showNames = false, time = 0;
   var mouse = { x: 0, y: 0, t: -1e9, inside: false, wx: 0, wy: 0 };
 
   function freshState(seed) {
@@ -115,7 +116,7 @@ function DRIVER(L, PARSE, VISF, VIEW_H, SAFE) {
     var src = SHANSHUI_LIB.toString() + "\n" + PARSE_CHUNK.toString() + "\n" + VIS_LIB.toString() + "\n" + DRIVER.toString() +
       "\nvar D = DRIVER(SHANSHUI_LIB(self), PARSE_CHUNK, VIS_LIB, " + VIEW_H + ", " + SAFE_MARGIN + ");" +
       "\nonmessage = function(e){ var m=e.data;" +
-      " if(m.op==='init'){ D.init(m.seed, m.dbg); postMessage({id:m.id,r:null}); return; }" +
+      " if(m.op==='init'){ D.init(m.seed, m.dbg, m.night); postMessage({id:m.id,r:null}); return; }" +
       " var o = m.op==='gen' ? D.gen() : D.paper(); postMessage({id:m.id, r:o.r}, o.t); };";
     try {
       var w = new Worker(URL.createObjectURL(new Blob([src], { type: "text/javascript" })));
@@ -132,7 +133,7 @@ function DRIVER(L, PARSE, VISF, VIEW_H, SAFE) {
       return {
         call: function (op, extra) {
           return new Promise(function (res) {
-            setTimeout(function () { res(op === "init" ? D.init(extra.seed, extra.dbg) : op === "gen" ? D.gen().r : D.paper().r); }, 0);
+            setTimeout(function () { res(op === "init" ? D.init(extra.seed, extra.dbg, extra.night) : op === "gen" ? D.gen().r : D.paper().r); }, 0);
           });
         },
         kill: function () {},
@@ -663,9 +664,12 @@ function DRIVER(L, PARSE, VISF, VIEW_H, SAFE) {
     brushes = [];
     for (var i = 0; i < BRUSHES; i++) brushes.push(makeBrush(i));
     document.getElementById("seed").textContent = seed;
-    try { history.replaceState(null, "", "?seed=" + encodeURIComponent(seed)); } catch (e) {}
+    document.body.classList.toggle("night", NIGHT);
+    document.getElementById("night").classList.toggle("on", NIGHT);
+    statusEl.innerHTML = NIGHT ? "lighting the lamps&hellip;" : "laying the first stones&hellip;";
+    try { history.replaceState(null, "", "?seed=" + encodeURIComponent(seed) + (NIGHT_Q ? "&night=" + NIGHT_Q : "")); } catch (e) {}
     // init then paper are queued before any chunk request, so a seed always gives the same landscape
-    gen.call("init", { seed: seed, dbg: DEBUG });
+    gen.call("init", { seed: seed, dbg: DEBUG, night: NIGHT });
     gen.call("paper").then(function (px) {
       var cv = document.createElement("canvas");
       cv.width = cv.height = 512;
@@ -673,7 +677,11 @@ function DRIVER(L, PARSE, VISF, VIEW_H, SAFE) {
       paperEl.style.backgroundImage = "url(" + cv.toDataURL() + ")";
     });
   }
-  var q = null, TV = false;
+  var q = null, TV = false, NIGHT_Q = null;
+  // ?night (or ?night=1) = night version; ?night=auto = night from 19:00 to 07:00 local time, checked at each new city
+  function nightNow() { if (!NIGHT_Q) return false; if (NIGHT_Q !== "auto") return true; var h = new Date().getHours(); return h >= 19 || h < 7; }
+  try { NIGHT_Q = new URLSearchParams(location.search).get("night"); if (NIGHT_Q === "") NIGHT_Q = "1"; } catch (e) {}
+  NIGHT = nightNow();
   try { TV = new URLSearchParams(location.search).has("tv"); q = new URLSearchParams(location.search).get("seed"); DEBUG = new URLSearchParams(location.search).has("debug"); } catch (e) {}
   start(q || String(Date.now()));
   requestAnimationFrame(frame);
@@ -690,7 +698,8 @@ function DRIVER(L, PARSE, VISF, VIEW_H, SAFE) {
   function togglePause() { paused = !paused; document.getElementById("pause").innerHTML = paused ? ICON_PLAY : ICON_PAUSE; }
   function toggleNames() { showNames = !showNames; document.getElementById("names").classList.toggle("on", showNames); }
   function toggleUI() { ui.classList.toggle("hidden"); }
-  function newSeed() { start(String(Math.floor(NRAND() * 1e9))); }
+  function newSeed() { NIGHT = nightNow(); start(String(Math.floor(NRAND() * 1e9))); }
+  function toggleNight() { NIGHT = !NIGHT; NIGHT_Q = NIGHT ? "1" : null; start(S.seed); }
   function fullscreen() {
     if (document.fullscreenElement) document.exitFullscreen();
     else if (document.documentElement.requestFullscreen) document.documentElement.requestFullscreen().catch(function () {});
@@ -701,6 +710,7 @@ function DRIVER(L, PARSE, VISF, VIEW_H, SAFE) {
   document.getElementById("pause").onclick = togglePause;
   document.querySelectorAll("[data-speed]").forEach(function (el) { el.onclick = function () { setSpeed(+el.dataset.speed); }; });
   document.getElementById("names").onclick = toggleNames;
+  document.getElementById("night").onclick = toggleNight;
   document.getElementById("reseed").onclick = newSeed;
   document.getElementById("full").onclick = fullscreen;
   document.getElementById("hide").onclick = toggleUI;
@@ -708,7 +718,7 @@ function DRIVER(L, PARSE, VISF, VIEW_H, SAFE) {
     var k = e.key.toLowerCase();
     if (k === " ") { togglePause(); e.preventDefault(); }
     else if (k === "1") setSpeed(1); else if (k === "2") setSpeed(2); else if (k === "3") setSpeed(4);
-    else if (k === "l") toggleNames(); else if (k === "n") newSeed();
+    else if (k === "l") toggleNames(); else if (k === "m") toggleNight(); else if (k === "n") newSeed();
     else if (k === "h") toggleUI(); else if (k === "f") fullscreen();
   });
   window.addEventListener("pointermove", function (e) { mouse.x = e.clientX; mouse.y = e.clientY; mouse.t = time; mouse.inside = true; });

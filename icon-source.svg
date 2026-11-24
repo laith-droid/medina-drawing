@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs><clipPath id="c"><rect x="8" y="8" width="240" height="240" rx="52"/></clipPath>
+    <linearGradient id="fer" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#eeebe4"/><stop offset=".5" stop-color="#aaa69d"/><stop offset="1" stop-color="#6f6b63"/></linearGradient></defs>
+  <g clip-path="url(#c)" stroke="#2a2622" stroke-width="5" stroke-linejoin="round" stroke-linecap="round">
+    <rect width="256" height="256" fill="#f6f4ef" stroke="none"/>
+    <path d="M170 64 a16 16 0 1 0 0.1 0z" fill="none" stroke="none"/>
+    <path d="M196 46 a20 20 0 1 0 14 34 a16 16 0 1 1 -14 -34z" fill="#c99730" stroke="#96691a" stroke-width="3"/>
+    <!-- minaret -->
+    <path d="M58 248 V92 H82 V248" fill="#fff"/>
+    <path d="M56 92 h28 M62 92 v-8 h20 v8" fill="#fff"/>
+    <path d="M64 84 Q72 62 80 84" fill="#c99730" stroke="#96691a" stroke-width="4"/>
+    <path d="M72 66 v-10" stroke="#96691a" stroke-width="3.5"/>
+    <path d="M64 128 v-10 a6 6 0 0 1 12 0 v10z" fill="#2a2622" stroke="none"/>
+    <!-- domed house -->
+    <path d="M98 248 V156 H186 V248" fill="#fff"/>
+    <path d="M112 156 Q112 106 142 102 Q172 106 172 156z" fill="#c99730" stroke="#96691a" stroke-width="4.5"/>
+    <path d="M142 102 v-14" stroke="#96691a" stroke-width="3.5"/>
+    <path d="M128 248 v-30 a14 14 0 0 1 28 0 v30z" fill="#2a58a8" stroke="#1d3f80" stroke-width="4"/>
+    <path d="M108 190 h12 v14 h-12z M164 190 h12 v14 h-12z" fill="#2a2622" stroke="none"/>
+    <!-- low house -->
+    <path d="M186 248 V190 H200 V178 H248 V248" fill="#fff"/>
+    <path d="M214 214 v-8 a5 5 0 0 1 10 0 v8z" fill="#2a2622" stroke="none"/>
+    <path d="M8 248 V176 H58" fill="#fff"/>
+    <path d="M24 204 h10 v12 h-10z" fill="#2a58a8" stroke="none"/>
+  </g>
+  <!-- brush cursor -->
+  <g transform="translate(176 150) rotate(-52) scale(.82)">
+    <g stroke="#fff" stroke-width="9" stroke-linejoin="round" fill="none">
+      <path d="M0 0 Q12 -12 32 -10 L32 10 Q12 12 0 0Z"/><rect x="30" y="-12.5" width="22" height="25" rx="4"/><path d="M50 -10 L118 -6.5 A6.5 6.5 0 0 1 118 6.5 L50 10Z"/>
+    </g>
+    <path d="M50 -10 L118 -6.5 A6.5 6.5 0 0 1 118 6.5 L50 10Z" fill="#e5484d" stroke="#8a1f22" stroke-width="2"/>
+    <rect x="56" y="-7" width="56" height="3.5" rx="1.7" fill="#fff" opacity=".35"/>
+    <rect x="30" y="-12.5" width="22" height="25" rx="4" fill="url(#fer)" stroke="#55514a" stroke-width="2"/>
+    <path d="M0 0 Q12 -12 32 -10 L32 10 Q12 12 0 0Z" fill="#1c1916" stroke="#000" stroke-width="1.5"/>
+    <path d="M18 -9 Q26 -9.6 32 -10 L32 10 Q26 9.6 18 9 Z" fill="#b89b72"/>
+  </g>
+</svg>
