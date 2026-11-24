@@ -19,11 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----------------------------------------------------------------------------
-Third-party code
-
-build/prng-noise.js contains the seeded PRNG and Perlin noise from
-shan-shui-inf, Copyright (c) 2018 Lingdong Huang, also under the MIT License.
-Its licence text is in build/SHANSHUI-LICENSE and is embedded in index.html.
-See CREDITS.md for every project this one draws on.
