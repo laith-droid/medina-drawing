@@ -90,9 +90,13 @@ function DRIVER(L, PARSE, VISF, VIEW_H, SAFE) {
   var curCv = document.getElementById("cursors"), curCtx = curCv.getContext("2d");
   var statusEl = document.getElementById("status");
 
+  var MAXW = 0;
+  try { var _q = new URLSearchParams(location.search); MAXW = +(_q.get("maxw") || (_q.has("tv") ? 1920 : 0)) || 0; } catch (e) {}
   var dpr, TS, Vd, Vc, viewW, W, H;
   function measure() {
     dpr = Math.min(window.devicePixelRatio || 1, 2);
+    // TVs (?tv): render at most 1920 device pixels wide (the TV upscales); 4K canvases drop a Fire TV Stick to ~7 fps
+    if (MAXW) dpr = Math.min(dpr, MAXW / window.innerWidth);
     W = window.innerWidth; H = window.innerHeight;
     inkCv.width = Math.round(W * dpr); inkCv.height = Math.round(H * dpr);
     curCv.width = Math.round(W * dpr); curCv.height = Math.round(H * dpr);
