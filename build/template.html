@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Medina Drawing</title>
+<style>
+  :root { --ink: #2b2925; --paper: #f6f4ef; --chip: rgba(250, 247, 240, 0.86); --line: rgba(43, 41, 37, 0.22); }
+  /* single look by choice: ink on paper in every theme */
+  :root { color-scheme: light; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--paper); color: var(--ink); }
+  #paper { position: fixed; inset: 0; background-color: var(--paper); }
+  canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; }
+  #ink { mix-blend-mode: multiply; }
+  #cursors { pointer-events: none; }
+  #status { position: fixed; left: 50%; top: 46%; transform: translate(-50%, -50%); font: italic 15px/1.4 "Iowan Old Style", Palatino, Georgia, serif;
+    color: rgba(43, 41, 37, 0.6); letter-spacing: 0.04em; transition: opacity 1.2s; pointer-events: none; }
+  #ui { position: fixed; left: 50%; bottom: calc(14px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); display: flex; gap: 4px; align-items: center; flex-wrap: wrap; justify-content: center;
+    max-width: calc(100vw - 32px); padding: 5px; border-radius: 12px; background: var(--chip); border: 1px solid var(--line);
+    box-shadow: 0 6px 24px rgba(40, 30, 10, 0.12); font: 500 12.5px/1 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    opacity: 0.55; transition: opacity 0.25s, transform 0.3s; backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
+  #ui:hover { opacity: 1; }
+  #ui.hidden { transform: translate(-50%, 140%); opacity: 0; }
+  #ui button svg { display: block; margin: 0 auto; }
+  #ui button { font: inherit; color: var(--ink); background: transparent; border: 0; border-radius: 8px; padding: 7px 10px; cursor: pointer; min-width: 30px; }
+  #ui button:hover { background: rgba(43, 41, 37, 0.08); }
+  #ui button.on { background: var(--ink); color: #f6f1e6; }
+  #ui .sep { width: 1px; height: 18px; background: var(--line); margin: 0 3px; }
+  #ui .num { min-width: 22px; text-align: center; font-variant-numeric: tabular-nums; }
+  #ui .seed { padding: 0 8px; color: rgba(43, 41, 37, 0.55); font-variant-numeric: tabular-nums; max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #credit { position: fixed; right: calc(12px + env(safe-area-inset-right, 0px)); top: calc(10px + env(safe-area-inset-top, 0px)); font: italic 11px/1.3 "Iowan Old Style", Palatino, Georgia, serif; color: rgba(43, 41, 37, 0.45); text-align: right; pointer-events: none; }
+</style>
+</head>
+<body>
+<div id="paper"></div>
+<canvas id="ink"></canvas>
+<canvas id="cursors"></canvas>
+<div id="status">laying the first stones&hellip;</div>
+<div id="credit">after the method of shan-shui-inf by Lingdong Huang (MIT)</div>
+<div id="ui">
+  <button id="pause" title="Pause (Space)"></button>
+  <span class="sep"></span>
+  <button data-speed="1" title="Speed (1)">1×</button><button data-speed="2" title="Speed (2)">2×</button><button data-speed="4" title="Speed (3)">4×</button>
+  <span class="sep"></span>
+  <button id="names" title="Names (L)">Names</button>
+  <button id="reseed" title="New city (N)">New city</button>
+  <span class="seed" id="seed" title="Seed"></span>
+  <button id="full" title="Fullscreen (F)"><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1 4V1h3M8 1h3v3M11 8v3H8M4 11H1V8"/></svg></button>
+  <button id="hide" title="Hide toolbar (H)"><svg width="12" height="12" viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.5"><path d="M2 2l8 8M10 2l-8 8"/></svg></button>
+</div>
+<script>
+/* PRNG + noise from shan-shui-inf — Copyright (c) 2018 Lingdong Huang — MIT License (full text below) */
+function SHANSHUI_LIB(window) {
+var MEM;
+/*__LIB__*/
+return { MEM: MEM, chunkloader: chunkloader, Noise: Noise };
+}
+</script>
+<script>
+/*__PARSE__*/
+</script>
+<script>
+/*__VIS__*/
+</script>
+<script>
+/*__APP__*/
+</script>
+<!--
+/*__LICENSE__*/
+-->
+</body>
+</html>

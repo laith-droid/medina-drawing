@@ -1,0 +1,853 @@
+  // =====================================================================================
+  // Medina generator: an endless hillside city of whitewashed houses, domes, minarets,
+  // kasbah towers and palms, drawn as pen strokes. Written for this project.
+  // Output contract (same as shan-shui-inf's, so the parser/occlusion/brush engine is shared):
+  //   MEM.chunks = [{ tag, x, y (depth key: larger = nearer), canv (SVG polylines) }], sorted by y.
+  //   Pen lines are ribbons tagged data-k='s'; white fills are erasers (bodies); other fills are washes.
+  // =====================================================================================
+  var INK = "rgba(30,27,24,0.93)";
+  var INK_FAR = "rgba(30,27,24,0.42)";
+  var INK_MID = "rgba(30,27,24,0.7)";
+  var INK_FILL = "rgba(30,27,24,0.88)";
+  var GOLD = "rgba(201,151,48,0.8)";
+  var GOLD_PALE = "rgba(214,170,78,0.55)";
+  var GOLD_INK = "rgba(150,106,24,0.95)";
+  var BLUE = "rgba(30,72,160,0.82)";
+  var BLUE_PALE = "rgba(64,112,190,0.5)";
+  var BLUE_INK = "rgba(24,56,130,0.95)";
+  var WHITE = "white";
+
+  var VIEW_H = 700, GROUND = 714, ROW_DY = 50, NROWS = 11, SCALE = 1.18;
+
+  function R(a, b) { return a + Math.random() * (b - a); }
+  function RI(a, b) { return Math.floor(a + Math.random() * (b - a + 1)); }
+  function pick(a) { return a[Math.floor(Math.random() * a.length)]; }
+  function chance(p) { return Math.random() < p; }
+  function wpick(opts) { // [[weight, value], ...]
+    var t = 0, i;
+    for (i = 0; i < opts.length; i++) t += opts[i][0];
+    var r = Math.random() * t;
+    for (i = 0; i < opts.length; i++) { r -= opts[i][0]; if (r <= 0) return opts[i][1]; }
+    return opts[opts.length - 1][1];
+  }
+
+  // ---------------- primitives ----------------
+  function poly(pl, fil, str, wid, k) {
+    var c = "<polyline points='";
+    for (var i = 0; i < pl.length; i++) c += " " + pl[i][0].toFixed(1) + "," + pl[i][1].toFixed(1);
+    return c + "' style='fill:" + (fil || "none") + ";stroke:" + (str || fil || "none") + ";stroke-width:" + (wid || 0) + "'" + (k ? " data-k='" + k + "'" : "") + "/>";
+  }
+  function body(pl) { return poly(pl, WHITE); }       // opaque white: hides what is behind, never painted
+  function wash(pl, col) { return poly(pl, col); }    // a filled colour/ink area
+
+  function densify(pl, step) {
+    var out = [pl[0]];
+    for (var i = 1; i < pl.length; i++) {
+      var a = pl[i - 1], b = pl[i], L = Math.hypot(b[0] - a[0], b[1] - a[1]), n = Math.max(1, Math.ceil(L / step));
+      for (var k = 1; k <= n; k++) out.push([a[0] + (b[0] - a[0]) * k / n, a[1] + (b[1] - a[1]) * k / n]);
+    }
+    return out;
+  }
+  // A pen line: the polyline becomes a thin ribbon with a hand-drawn wobble and softly tapered ends.
+  // Layout matches shan-shui's stroke(): p0, L1..Lm, pEnd, Rm..R1, p0.
+  function pen(pl, o) {
+    o = o || {};
+    var s = o.s || 1, wid = (o.w || 0.55) * (0.6 + 0.4 * s), col = o.col || INK, jit = (o.j == null ? 0.45 : o.j) * s;
+    if (pl.length < 2) return "";
+    var d = densify(pl, o.step || 4.5);
+    if (d.length < 3) d = [d[0], [(d[0][0] + d[1][0]) / 2, (d[0][1] + d[1][1]) / 2], d[1]];
+    var n0 = Math.random() * 100, n = d.length, i;
+    if (jit > 0) for (i = 0; i < n; i++) {
+      d[i] = [d[i][0] + (Noise.noise(i * 0.13, n0) - 0.5) * 2 * jit, d[i][1] + (Noise.noise(i * 0.13, n0 + 40) - 0.5) * 2 * jit];
+    }
+    var Ls = [], Rs = [];
+    for (i = 1; i < n - 1; i++) {
+      var tx = d[i + 1][0] - d[i - 1][0], ty = d[i + 1][1] - d[i - 1][1], tl = Math.hypot(tx, ty) || 1;
+      var nx = -ty / tl, ny = tx / tl, f = i / (n - 1);
+      var w = wid * Math.min(1, 0.3 + Math.min(f, 1 - f) * (o.taper || 9)) * (0.75 + 0.5 * Noise.noise(i * 0.35, n0 + 80));
+      Ls.push([d[i][0] + nx * w, d[i][1] + ny * w]);
+      Rs.push([d[i][0] - nx * w, d[i][1] - ny * w]);
+    }
+    return poly([d[0]].concat(Ls, [d[n - 1]], Rs.reverse(), [d[0]]), col, col, 0, "s");
+  }
+  function closed(pl) { return pl.concat([pl[0], pl[1] ? [(pl[0][0] + pl[1][0]) / 2, (pl[0][1] + pl[1][1]) / 2] : pl[0]]); }
+  function rect(x0, y0, x1, y1) { return [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]; }
+  function circ(cx, cy, r, n) { var p = []; n = n || 24; for (var i = 0; i < n; i++) { var a = i / n * Math.PI * 2; p.push([cx + Math.cos(a) * r, cy + Math.sin(a) * r]); } return p; }
+
+  // Arch opening, from bottom-left up and over to bottom-right (open at the bottom).
+  function arch(cx, yb, w, h, type) {
+    var r = w / 2, p = [], k, N = 14, a, t0, t1, cyc;
+    if (type === "pointed") {
+      var Rr = w * 0.82, ca = (r - Rr) / Rr, ta = Math.acos(Math.max(-1, Math.min(1, ca))), rise = Rr * Math.sin(ta);
+      var ys = yb - Math.max(0, h - rise);
+      p.push([cx - r, yb], [cx - r, ys]);
+      for (k = 1; k <= N; k++) { a = Math.PI - (Math.PI - ta) * (k / N); p.push([cx - r + Rr + Rr * Math.cos(a), ys - Rr * Math.sin(a)]); }
+      for (k = N - 1; k >= 0; k--) { a = Math.PI - (Math.PI - ta) * (k / N); p.push([cx + r - Rr - Rr * Math.cos(a), ys - Rr * Math.sin(a)]); }
+      p.push([cx + r, yb]);
+      return p;
+    }
+    if (type === "horseshoe") {
+      var rr = r * 1.18, dy = Math.sqrt(rr * rr - r * r), top = rr + dy, jt = yb - Math.max(0, h - top);
+      cyc = jt - dy; t0 = Math.atan2(dy, -r); t1 = Math.atan2(dy, r) + Math.PI * 2;
+      p.push([cx - r, yb], [cx - r, jt]);
+      for (k = 1; k < N * 1.4; k++) { a = t0 + (t1 - t0) * k / (N * 1.4); p.push([cx + rr * Math.cos(a), cyc + rr * Math.sin(a)]); }
+      p.push([cx + r, jt], [cx + r, yb]);
+      return p;
+    }
+    if (type === "keyhole") { // horseshoe on a narrow neck: a classic Maghrebi door shape
+      return arch(cx, yb, w, h, "horseshoe");
+    }
+    // round
+    var ys2 = yb - Math.max(0, h - r);
+    p.push([cx - r, yb], [cx - r, ys2]);
+    for (k = 1; k < N; k++) { a = Math.PI + Math.PI * k / N; p.push([cx + r * Math.cos(a), ys2 + r * Math.sin(a)]); }
+    p.push([cx + r, ys2], [cx + r, yb]);
+    return p;
+  }
+  function scaleAbout(pl, cx, cy, f) { return pl.map(function (q) { return [cx + (q[0] - cx) * f, cy + (q[1] - cy) * f]; }); }
+
+  // Lines of a lattice clipped to a rectangle (diagonal 'sebka' grid), drawn as one zigzag stroke per direction.
+  function lattice(x0, y0, x1, y1, step, col, s) {
+    var c = "", w = x1 - x0, h = y1 - y0;
+    if (w < step || h < step) return "";
+    for (var dir = -1; dir <= 1; dir += 2) {
+      var path = [], n = Math.ceil((w + h) / step), flip = false;
+      for (var i = 1; i < n; i++) {
+        var off = i * step; // line x - dir*y = const, clipped
+        var pts = [];
+        // param: start on top or left edge
+        var a = dir > 0 ? [x0 + off, y0] : [x1 - off, y0];
+        var b = dir > 0 ? [x0 + off - h, y1] : [x1 - off + h, y1];
+        // clip segment a-b to the rectangle
+        var seg = clipSeg(a, b, x0, y0, x1, y1);
+        if (!seg) continue;
+        if (flip) seg.reverse();
+        flip = !flip;
+        path.push(seg[0], seg[1]);
+      }
+      if (path.length >= 2) c += pen(path, { s: s, w: 0.32, col: col, j: 0.15, step: 3 });
+    }
+    return c;
+  }
+  function clipSeg(a, b, x0, y0, x1, y1) { // Liang-Barsky
+    var dx = b[0] - a[0], dy = b[1] - a[1], t0 = 0, t1 = 1;
+    var P = [-dx, dx, -dy, dy], Q = [a[0] - x0, x1 - a[0], a[1] - y0, y1 - a[1]];
+    for (var i = 0; i < 4; i++) {
+      if (P[i] === 0) { if (Q[i] < 0) return null; continue; }
+      var t = Q[i] / P[i];
+      if (P[i] < 0) { if (t > t1) return null; if (t > t0) t0 = t; } else { if (t < t0) return null; if (t < t1) t1 = t; }
+    }
+    if (t1 - t0 < 1e-3) return null;
+    return [[a[0] + dx * t0, a[1] + dy * t0], [a[0] + dx * t1, a[1] + dy * t1]];
+  }
+  // hatching across a rectangle, one continuous zigzag stroke
+  function hatch(x0, y0, x1, y1, step, s, col) {
+    var path = [], h = y1 - y0, flip = false;
+    for (var x = x0 + step * 0.5; x < x1 + h; x += step) {
+      var seg = clipSeg([x, y0], [x - h * 0.7, y1], x0, y0, x1, y1);
+      if (!seg) continue;
+      if (flip) seg.reverse();
+      flip = !flip;
+      path.push(seg[0], seg[1]);
+    }
+    return path.length >= 2 ? pen(path, { s: s, w: 0.28, col: col || INK_MID, j: 0.2, step: 3 }) : "";
+  }
+
+  // ---------------- small parts ----------------
+  function crescent(cx, cy, r, s) { // outer disc minus an inner disc offset to the right: opens to the right
+    var o = [], k, a0 = 0.896, b0 = 1.35;
+    for (k = 0; k <= 20; k++) { var a = a0 + (Math.PI * 2 - 2 * a0) * k / 20; o.push([cx + Math.cos(a) * r, cy + Math.sin(a) * r]); }
+    for (k = 20; k >= 0; k--) { var b = b0 + (Math.PI * 2 - 2 * b0) * k / 20; o.push([cx + 0.45 * r + Math.cos(b) * r * 0.8, cy + Math.sin(b) * r * 0.8]); }
+    return wash(o, GOLD) + pen(o, { s: s, w: 0.3, col: GOLD_INK, j: 0.05, step: 2 });
+  }
+  function finial(cx, yb, s, gold) {
+    var c = "", h = R(7, 12) * s, col = gold ? GOLD_INK : INK;
+    c += pen([[cx, yb], [cx, yb - h]], { s: s, w: 0.4, col: col, j: 0.05 });
+    var y = yb - h * 0.35;
+    for (var i = 0; i < RI(1, 3); i++) { var r = (1.8 - i * 0.4) * s; c += wash(circ(cx, y - r, r, 10), gold ? GOLD : INK_FILL); y -= r * 2 + 0.6 * s; }
+    if (chance(0.55)) c += crescent(cx, yb - h - 2.4 * s, 2.6 * s, s);
+    return c;
+  }
+  // dome profile from left base over to right base
+  function domePts(cx, yb, w, type) {
+    var r = w / 2, p = [], N = 20, k, t, x, y;
+    for (k = 0; k <= N; k++) {
+      t = k / N; // 0 left .. 1 right
+      var u = t * 2 - 1; // -1..1
+      if (type === "onion") {
+        var bulge = 1 + 0.22 * Math.sin(Math.PI * Math.min(1, (1 - Math.abs(u)) * 1.6));
+        var hh = Math.sqrt(Math.max(0, 1 - u * u));
+        x = cx + u * r * (1 + 0.25 * Math.pow(hh, 0.7) * (Math.abs(u) < 0.55 ? (Math.abs(u) / 0.55) : 1));
+        y = yb - r * 1.15 * Math.pow(hh, 0.8) - r * 0.55 * Math.pow(Math.max(0, 1 - Math.abs(u) * 2.2), 2);
+        p.push([cx + u * r * bulge * (Math.abs(u) > 0.15 ? 1 : 1), y]);
+      } else if (type === "pointed") {
+        var hh2 = Math.sqrt(Math.max(0, 1 - u * u));
+        y = yb - r * (hh2 * 1.0 + 0.45 * Math.pow(Math.max(0, 1 - Math.abs(u)), 2.2));
+        p.push([cx + u * r, y]);
+      } else {
+        p.push([cx + u * r, yb - r * Math.sqrt(Math.max(0, 1 - u * u)) * (type === "flat" ? 0.7 : 1)]);
+      }
+    }
+    return p;
+  }
+  function dome(cx, yb, w, s, o) {
+    o = o || {};
+    var c = "", type = o.type || pick(["half", "onion", "pointed", "half"]);
+    var fill = o.fill || wpick([[4, "gold"], [3, "blue"], [3, "white"]]);
+    var dh = o.drum == null ? R(4, 9) * s : o.drum;
+    // drum
+    var dw = w * 0.92;
+    if (dh > 0) {
+      c += body(rect(cx - dw / 2, yb - dh, cx + dw / 2, yb));
+      c += pen([[cx - dw / 2, yb], [cx - dw / 2, yb - dh], [cx + dw / 2, yb - dh], [cx + dw / 2, yb]], { s: s });
+      // drum windows
+      var nw = Math.max(1, Math.floor(dw / (7 * s)));
+      for (var i = 0; i < nw; i++) {
+        var wx = cx - dw / 2 + (i + 0.5) * dw / nw;
+        if (dh > 5 * s) c += wash(closed(arch(wx, yb - dh * 0.2, 2 * s, dh * 0.6, "round")).slice(0, -2), INK_FILL);
+      }
+    }
+    var p = domePts(cx, yb - dh, w, type);
+    var top = p[Math.floor(p.length / 2)];
+    for (var q = 0; q < p.length; q++) if (p[q][1] < top[1]) top = p[q];
+    c += body(p);
+    if (fill === "gold") c += wash(p, GOLD);
+    else if (fill === "blue") c += wash(p, BLUE);
+    c += pen(p, { s: s, w: 0.6, col: fill === "white" ? INK : fill === "gold" ? GOLD_INK : BLUE_INK });
+    // ribs
+    if (fill !== "white" || chance(0.6)) {
+      var nr = RI(2, 4), colr = fill === "white" ? INK_MID : fill === "gold" ? GOLD_INK : "rgba(240,240,255,0.55)";
+      for (var k = 1; k <= nr; k++) {
+        var f = k / (nr + 1), rib = [];
+        for (var m = 0; m <= 8; m++) {
+          var g = m / 8, px = cx + (f - 0.5) * w * Math.pow(1 - g, 0.6), py = yb - dh - (yb - dh - top[1]) * g;
+          rib.push([px, py]);
+        }
+        c += pen(rib, { s: s, w: 0.25, col: colr, j: 0.1, step: 3 });
+      }
+    }
+    c += finial(top[0], top[1] + 0.5, s, fill !== "white" || chance(0.5));
+    return { c: c, top: top[1] };
+  }
+
+  // a window or opening, centred at cx, bottom at yb
+  function windowAt(cx, yb, s, kind, acc) {
+    var c = "", w, h, p;
+    if (kind === "slit") { w = 2.4 * s; h = 7 * s; return wash(rect(cx - w / 2, yb - h, cx + w / 2, yb), INK_FILL); }
+    if (kind === "square") {
+      w = R(5, 7) * s; h = w * R(1, 1.3);
+      p = rect(cx - w / 2, yb - h, cx + w / 2, yb);
+      if (acc === "blue") { c += wash(p, BLUE); c += pen(closed(p), { s: s, w: 0.45, col: BLUE_INK }); c += pen([[cx, yb - h], [cx, yb]], { s: s, w: 0.3, col: BLUE_INK, j: 0.1 }); }
+      else if (acc === "open") { c += pen(closed(p), { s: s, w: 0.45 }); c += pen([[cx, yb - h], [cx, yb], [cx, yb - h / 2], [cx - w / 2, yb - h / 2], [cx + w / 2, yb - h / 2]], { s: s, w: 0.3, j: 0.1 }); }
+      else c += wash(p, INK_FILL);
+      return c;
+    }
+    if (kind === "grille") {
+      w = R(6, 9) * s; h = w * 1.2;
+      p = rect(cx - w / 2, yb - h, cx + w / 2, yb);
+      c += pen(closed(p), { s: s, w: 0.45 });
+      var bars = [], nb = 3;
+      for (var i = 1; i <= nb; i++) { var bx = cx - w / 2 + w * i / (nb + 1); bars.push(i % 2 ? [bx, yb - h] : [bx, yb], i % 2 ? [bx, yb] : [bx, yb - h]); }
+      c += pen(bars, { s: s, w: 0.3, j: 0.1 });
+      c += pen([[cx - w / 2 - 1.5 * s, yb + 0.8 * s], [cx + w / 2 + 1.5 * s, yb + 0.8 * s]], { s: s, w: 0.4 });
+      return c;
+    }
+    if (kind === "mashrabiya") { // a projecting lattice box
+      w = R(9, 13) * s; h = w * R(1.1, 1.4);
+      p = rect(cx - w / 2, yb - h, cx + w / 2, yb);
+      c += body(p);
+      if (acc === "blue") c += wash(p, BLUE_PALE); else if (acc === "gold") c += wash(p, GOLD_PALE);
+      c += pen(closed(p), { s: s, w: 0.5 });
+      c += lattice(cx - w / 2, yb - h, cx + w / 2, yb, 2.6 * s, acc === "gold" ? GOLD_INK : acc === "blue" ? BLUE_INK : INK_MID, s);
+      c += pen([[cx - w / 2 - 1.5 * s, yb - h - 1.2 * s], [cx + w / 2 + 1.5 * s, yb - h - 1.2 * s]], { s: s, w: 0.5 });
+      c += pen([[cx - w / 2 + 1, yb + 1.5 * s], [cx, yb + 3.5 * s], [cx + w / 2 - 1, yb + 1.5 * s]], { s: s, w: 0.35 });
+      return c;
+    }
+    if (kind === "twin") {
+      w = R(4, 5.5) * s; h = w * 2;
+      for (var t = -1; t <= 1; t += 2) {
+        p = arch(cx + t * (w / 2 + 0.6 * s), yb, w, h, "round");
+        c += wash(p, acc === "blue" ? BLUE : INK_FILL);
+      }
+      c += pen(closed(arch(cx, yb + 0.5 * s, 2 * w + 3.5 * s, h + 3.5 * s, "round")).slice(0, -1), { s: s, w: 0.4 });
+      return c;
+    }
+    // arched (round / pointed / horseshoe)
+    var type = kind === "arch" ? pick(["round", "pointed", "horseshoe"]) : kind;
+    w = R(5, 7.5) * s; h = w * R(1.6, 2.1);
+    p = arch(cx, yb, w, h, type);
+    if (acc === "blue") c += wash(p, BLUE); else if (acc === "gold") c += wash(p, GOLD); else c += wash(p, INK_FILL);
+    if (chance(0.6)) c += pen(arch(cx, yb, w + 2.6 * s, h + 2.2 * s, type), { s: s, w: 0.4 });
+    if (chance(0.5)) c += pen([[cx - w / 2 - 1.6 * s, yb + 0.8 * s], [cx + w / 2 + 1.6 * s, yb + 0.8 * s]], { s: s, w: 0.4 });
+    return c;
+  }
+
+  function doorAt(cx, yb, s, acc, type) {
+    var c = "", w = R(9, 13) * s, h = w * R(1.7, 2.1);
+    type = type || pick(["round", "horseshoe", "pointed", "horseshoe", "square"]);
+    var p = type === "square" ? [[cx - w / 2, yb], [cx - w / 2, yb - h], [cx + w / 2, yb - h], [cx + w / 2, yb]] : arch(cx, yb, w, h, type);
+    var col = acc === "blue" ? BLUE : acc === "gold" ? GOLD : INK_FILL;
+    c += wash(p, col);
+    if (acc === "blue" || acc === "gold") {
+      c += pen(p, { s: s, w: 0.5, col: acc === "blue" ? BLUE_INK : GOLD_INK });
+      c += pen([[cx, yb - h * 0.78], [cx, yb]], { s: s, w: 0.3, col: acc === "blue" ? BLUE_INK : GOLD_INK, j: 0.1 });
+      // studs
+      for (var i = 0; i < 3; i++) c += wash(circ(cx - w * 0.22, yb - h * (0.25 + i * 0.18), 0.5 * s, 6), acc === "blue" ? "rgba(235,235,255,0.8)" : GOLD_INK);
+    }
+    // frame
+    var fw = w + R(4, 7) * s, fh = h + R(3, 6) * s;
+    if (type !== "square" && chance(0.75)) c += pen(arch(cx, yb, fw, fh, type), { s: s, w: 0.5 });
+    if (chance(0.45)) c += pen(closed(rect(cx - fw / 2 - 2 * s, yb - fh - 3 * s, cx + fw / 2 + 2 * s, yb)).slice(0, -1), { s: s, w: 0.45 });
+    if (chance(0.35)) { // tile surround band
+      var ty = yb - fh - 3 * s, n = Math.floor((fw + 4 * s) / (2.6 * s));
+      for (var k = 0; k < n; k++) if (k % 2 === 0) c += wash(rect(cx - fw / 2 - 2 * s + k * 2.6 * s, ty - 2.2 * s, cx - fw / 2 - 2 * s + (k + 1) * 2.6 * s, ty), acc === "gold" ? GOLD : BLUE);
+    }
+    return c;
+  }
+
+  // ---------------- buildings ----------------
+  function roofProfile(x0, x1, yt, s, style) {
+    var w = x1 - x0, p = [], k;
+    if (style === "stepped") {
+      var nst = RI(1, 3), sh = R(7, 13) * s, sw = w * R(0.14, 0.24), left = chance(0.5);
+      var pts = [];
+      for (k = 0; k < nst; k++) {
+        var y = yt + (nst - k) * sh;
+        pts.push([x0 + k * sw, y], [x0 + (k + 1) * sw, y]);
+      }
+      pts.push([x0 + nst * sw, yt], [x1, yt]);
+      if (!left) pts = pts.map(function (q) { return [x0 + x1 - q[0], q[1]]; }).reverse();
+      return pts;
+    }
+    if (style === "crenel") { // Moroccan stepped merlons
+      var tw = R(4.5, 6.5) * s, th = R(3.5, 5.5) * s, n = Math.max(2, Math.floor(w / (tw * 2))), gap = (w - n * tw) / n;
+      p.push([x0, yt]);
+      var x = x0 + gap / 2;
+      for (k = 0; k < n; k++) {
+        p.push([x, yt], [x, yt - th * 0.55], [x + tw * 0.18, yt - th * 0.55], [x + tw * 0.18, yt - th], [x + tw * 0.82, yt - th], [x + tw * 0.82, yt - th * 0.55], [x + tw, yt - th * 0.55], [x + tw, yt]);
+        x += tw + gap;
+      }
+      p.push([x1, yt]);
+      return p;
+    }
+    if (style === "raised") {
+      var rw = w * R(0.3, 0.5), rx = chance(0.5) ? x0 + w * R(0.05, 0.2) : x1 - rw - w * R(0.05, 0.2), rh = R(10, 22) * s;
+      return [[x0, yt], [rx, yt], [rx, yt - rh], [rx + rw, yt - rh], [rx + rw, yt], [x1, yt]];
+    }
+    if (style === "bumps") { // rounded parapet
+      var nb = Math.max(2, Math.floor(w / (9 * s))), bw = w / nb;
+      p.push([x0, yt]);
+      for (k = 0; k < nb; k++) for (var m = 1; m <= 6; m++) { var a = Math.PI * m / 6; p.push([x0 + k * bw + bw * (1 - Math.cos(a)) / 2, yt - Math.sin(a) * bw * 0.28]); }
+      return p;
+    }
+    return [[x0, yt], [x1, yt]];
+  }
+
+  function house(x0, yb, w, h, s, ctx) {
+    var c = "", x1 = x0 + w, yt = yb - h;
+    var style = wpick([[34, "flat"], [24, "stepped"], [14, "crenel"], [14, "raised"], [8, "bumps"]]);
+    var prof = roofProfile(x0, x1, yt, s, style);
+    var outline = [[x0, yb + 3 * s]].concat(prof, [[x1, yb + 3 * s]]);
+    c += body(outline);
+    var extras = "";
+    // rooftop parapet lip
+    if (style === "flat" && chance(0.6)) extras += pen([[x0 - 1.5 * s, yt + 2.2 * s], [x1 + 1.5 * s, yt + 2.2 * s]], { s: s, w: 0.4 });
+    // facade
+    var acc = wpick([[5, "none"], [3, "blue"], [1.4, "gold"]]);
+    var kinds = [wpick([[4, "square"], [3, "arch"], [2, "slit"], [2, "grille"], [1.3, "twin"]]), wpick([[3, "square"], [2, "arch"], [1, "mashrabiya"], [1, "slit"]])];
+    var colW = 13 * s, flH = 20 * s;
+    var ncol = Math.max(1, Math.floor((w - 4 * s) / colW)), nfl = Math.max(1, Math.floor((h - 6 * s) / flH));
+    var doorCol = chance(0.65) ? RI(0, ncol - 1) : -1;
+    for (var f = 0; f < nfl; f++) {
+      for (var k = 0; k < ncol; k++) {
+        var cx = x0 + (k + 0.5) * w / ncol, wy = yb - f * flH - 5 * s;
+        if (f === 0 && k === doorCol) { extras += doorAt(cx, yb, s, chance(0.6) ? acc : "none"); continue; }
+        if (f === 0 && Math.abs(k - doorCol) === 0) continue;
+        if (!chance(f === 0 ? 0.35 : 0.55)) continue;
+        if (wy - 14 * s < yt) continue;
+        var kind = kinds[(f + k) % 2 === 0 ? 0 : 1];
+        var a2 = kind === "mashrabiya" ? pick(["blue", "gold", "none"]) : chance(0.45) ? (acc === "none" ? (chance(0.5) ? "open" : "none") : acc) : "none";
+        extras += windowAt(cx, wy, s, kind, a2);
+      }
+    }
+    // outside stair up the wall
+    if (chance(0.13) && h > 35 * s && w > 30 * s) {
+      var left = chance(0.5), sx0 = left ? x0 + 2 * s : x1 - 2 * s, dir = left ? 1 : -1, steps = RI(4, 7), stH = Math.min(5 * s, (h * 0.55) / steps), stW = stH * 1.15;
+      var st = [[sx0, yb]];
+      for (var i = 0; i < steps; i++) { var lx = st[st.length - 1]; st.push([lx[0], lx[1] - stH], [lx[0] + dir * stW, lx[1] - stH]); }
+      var endp = st[st.length - 1];
+      extras += body(st.concat([[endp[0], yb]]));
+      extras += pen(st, { s: s, w: 0.45 });
+      extras += pen([[sx0, yb], [endp[0], yb], [endp[0], endp[1]]], { s: s, w: 0.4 });
+      extras += pen([[sx0 + dir * 1 * s, yb - 7 * s], [endp[0] + dir * 1, endp[1] - 6 * s]], { s: s, w: 0.35 });
+      extras += doorAt(endp[0] + dir * 6 * s, endp[1], s * 0.75, acc, "round");
+    }
+    // tile band under the roof
+    if (chance(0.12) && style !== "stepped") {
+      var by = yt + 4 * s, n = Math.floor(w / (3 * s));
+      for (var t = 1; t < n - 1; t++) if (t % 2) extras += wash([[x0 + t * 3 * s, by], [x0 + (t + 0.5) * 3 * s, by - 1.5 * s], [x0 + (t + 1) * 3 * s, by], [x0 + (t + 0.5) * 3 * s, by + 1.5 * s]], chance(0.7) ? BLUE : GOLD);
+      extras += pen([[x0 + 1, by - 2.5 * s], [x1 - 1, by - 2.5 * s]], { s: s, w: 0.3 });
+      extras += pen([[x0 + 1, by + 2.5 * s], [x1 - 1, by + 2.5 * s]], { s: s, w: 0.3 });
+    }
+    // laundry line between two posts
+    if (chance(0.06) && style === "flat") {
+      var lx0 = x0 + w * 0.15, lx1 = x1 - w * 0.15, ly = yt - 9 * s;
+      extras += pen([[lx0, yt], [lx0, ly]], { s: s, w: 0.35 }) + pen([[lx1, yt], [lx1, ly]], { s: s, w: 0.35 });
+      var sag = [];
+      for (var q = 0; q <= 10; q++) sag.push([lx0 + (lx1 - lx0) * q / 10, ly + Math.sin(Math.PI * q / 10) * 2.5 * s]);
+      extras += pen(sag, { s: s, w: 0.25 });
+      for (q = 1; q < 6; q++) {
+        var cx2 = lx0 + (lx1 - lx0) * q / 6, cy2 = ly + Math.sin(Math.PI * q / 6) * 2.5 * s, cw = R(2.5, 4.5) * s, ch = R(3, 6) * s;
+        var cl = rect(cx2 - cw / 2, cy2, cx2 + cw / 2, cy2 + ch), col = pick([BLUE, GOLD, WHITE, WHITE]);
+        extras += body(cl) + (col !== WHITE ? wash(cl, col) : "") + pen(closed(cl), { s: s, w: 0.25 });
+      }
+    }
+    c += extras;
+    c += pen(outline, { s: s, w: 0.75 });
+    // rooftop dome / kiosk (separate bodies above the roof)
+    var flatTop = style === "flat" || style === "crenel" || style === "bumps";
+    if (flatTop && chance(0.07)) {
+      var dw = Math.min(w * 0.45, R(14, 26) * s), dcx = x0 + w * R(0.3, 0.7);
+      c += dome(dcx, yt + 0.5, dw, s).c;
+    } else if (flatTop && chance(0.12)) {
+      var kw = Math.min(w * 0.4, R(10, 16) * s), kh = kw * R(0.6, 0.9), kx = x0 + w * R(0.15, 0.85) - kw / 2;
+      var kp = [[kx, yt + 1], [kx, yt - kh], [kx + kw, yt - kh], [kx + kw, yt + 1]];
+      c += body(kp) + doorAt(kx + kw / 2, yt, s * 0.6, "none", "round") + pen(kp, { s: s, w: 0.6 });
+      if (chance(0.5)) c += dome(kx + kw / 2, yt - kh, kw * 0.8, s, { drum: 0 }).c;
+    }
+    return c;
+  }
+
+  function mosque(x0, yb, w, h, s) {
+    var c = "", x1 = x0 + w, yt = yb - h, cx = (x0 + x1) / 2;
+    var prof = roofProfile(x0, x1, yt, s, chance(0.6) ? "crenel" : "flat");
+    var outline = [[x0, yb + 3 * s]].concat(prof, [[x1, yb + 3 * s]]);
+    c += body(outline);
+    // arcade of arches
+    var n = Math.max(3, Math.floor(w / (11 * s))), aw = w / n, type = pick(["horseshoe", "pointed", "round"]);
+    for (var i = 0; i < n; i++) {
+      var ax = x0 + (i + 0.5) * aw, ah = Math.min(h * 0.55, aw * 1.8);
+      c += wash(arch(ax, yb, aw * 0.62, ah, type), INK_FILL);
+      c += pen(arch(ax, yb, aw * 0.8, ah + 2.5 * s, type), { s: s, w: 0.45 });
+    }
+    c += pen([[x0 + 1, yb - h * 0.62], [x1 - 1, yb - h * 0.62]], { s: s, w: 0.35 });
+    c += pen(outline, { s: s, w: 0.75 });
+    var fill = wpick([[5, "gold"], [3, "blue"], [2, "white"]]);
+    var dw = Math.min(w * 0.6, R(34, 50) * s);
+    c += dome(cx, yt + 0.5, dw, s, { fill: fill, drum: R(6, 11) * s }).c;
+    if (w > 60 * s && chance(0.45)) {
+      var sw = dw * 0.4;
+      c += dome(x0 + w * 0.17, yt + 0.5, sw, s, { fill: fill, type: "half", drum: 2 * s }).c;
+      c += dome(x1 - w * 0.17, yt + 0.5, sw, s, { fill: fill, type: "half", drum: 2 * s }).c;
+    }
+    return c;
+  }
+
+  function minaret(cx, yb, s) {
+    var c = "", mw = R(15, 21) * s, mh = R(150, 220) * s, x0 = cx - mw / 2, x1 = cx + mw / 2, yt = yb - mh;
+    var square = chance(0.6);
+    if (square) {
+      // Maghrebi square tower
+      var shaft = [[x0, yb + 3 * s], [x0, yt], [x1, yt], [x1, yb + 3 * s]];
+      c += body(shaft);
+      var parts = "";
+      // panels with blind arches / lattice
+      var py = yb - 18 * s, k = 0;
+      while (py - 30 * s > yt + 24 * s) {
+        var ph = R(22, 32) * s;
+        if (k % 3 === 2 && ph > 20 * s) {
+          parts += pen(closed(rect(x0 + 2.5 * s, py - ph, x1 - 2.5 * s, py)).slice(0, -1), { s: s, w: 0.4 });
+          parts += lattice(x0 + 2.5 * s, py - ph, x1 - 2.5 * s, py, 3.2 * s, chance(0.5) ? GOLD_INK : INK_MID, s);
+        } else {
+          parts += pen(arch(cx, py, mw * 0.62, ph * 0.85, pick(["horseshoe", "pointed"])), { s: s, w: 0.4 });
+          parts += windowAt(cx, py - ph * 0.2, s * 0.8, k % 2 ? "slit" : "twin", chance(0.3) ? "blue" : "none");
+        }
+        py -= ph + R(4, 8) * s; k++;
+      }
+      // decorative band near the top
+      var band = rect(x0, yt + 4 * s, x1, yt + 12 * s);
+      parts += wash(band, chance(0.6) ? GOLD_PALE : BLUE_PALE);
+      parts += lattice(x0, yt + 4 * s, x1, yt + 12 * s, 2.4 * s, GOLD_INK, s);
+      parts += pen([[x0, yt + 12 * s], [x1, yt + 12 * s]], { s: s, w: 0.4 });
+      c += parts;
+      // merlons
+      var cren = roofProfile(x0 - 1.5 * s, x1 + 1.5 * s, yt, s, "crenel");
+      c += body(cren.concat([[x1 + 1.5 * s, yt + 3 * s], [x0 - 1.5 * s, yt + 3 * s]]));
+      c += pen(shaft, { s: s, w: 0.8 });
+      c += pen([[x0 - 1.5 * s, yt + 3 * s]].concat(cren, [[x1 + 1.5 * s, yt + 3 * s], [x0 - 1.5 * s, yt + 3 * s]]), { s: s, w: 0.55 });
+      // lantern
+      var lw = mw * 0.5, lh = lw * 1.4, lx0 = cx - lw / 2, ly = yt - 4 * s;
+      var lan = [[lx0, yt], [lx0, ly - lh], [lx0 + lw, ly - lh], [lx0 + lw, yt]];
+      c += body(lan) + wash(arch(cx, ly - 1 * s, lw * 0.45, lh * 0.6, "horseshoe"), INK_FILL) + pen(lan, { s: s, w: 0.6 });
+      c += dome(cx, ly - lh, lw * 0.95, s, { type: "pointed", fill: chance(0.7) ? "gold" : "blue", drum: 0 }).c;
+    } else {
+      // round tower with balconies, pencil top
+      var stages = RI(2, 3), y = yb, wcur = mw, sh = mh / (stages + 0.4);
+      for (var st = 0; st < stages; st++) {
+        var a = cx - wcur / 2, b = cx + wcur / 2, ytop = y - sh;
+        var seg = [[a, y + 3 * s], [a, ytop], [b, ytop], [b, y + 3 * s]];
+        c += body(seg);
+        // vertical flutes
+        for (var fl = 1; fl < 3; fl++) c += pen([[a + wcur * fl / 3, y - 4 * s], [a + wcur * fl / 3, ytop + 5 * s]], { s: s, w: 0.25, col: INK_MID });
+        c += windowAt(cx, y - sh * 0.45, s * 0.8, "slit", "none");
+        c += pen(seg, { s: s, w: 0.75 });
+        // balcony
+        var bw = wcur + 7 * s, bh = 5 * s, bx = cx - bw / 2;
+        var bal = [[bx, ytop], [bx, ytop - bh], [bx + bw, ytop - bh], [bx + bw, ytop]];
+        var corb = [[cx - wcur / 2, ytop + 5 * s], [bx, ytop], [bx + bw, ytop], [cx + wcur / 2, ytop + 5 * s]];
+        c += body(corb.concat([[cx, ytop + 6 * s]]));
+        c += pen(corb, { s: s, w: 0.5 });
+        c += body(bal);
+        var rail = [];
+        for (var r = 0; r <= 8; r++) { var rx = bx + bw * r / 8; rail.push(r % 2 ? [rx, ytop - bh] : [rx, ytop], r % 2 ? [rx, ytop] : [rx, ytop - bh]); }
+        c += pen(rail, { s: s, w: 0.3, j: 0.1 });
+        c += pen(closed(bal).slice(0, -1), { s: s, w: 0.5 });
+        y = ytop - bh; wcur *= 0.82;
+      }
+      // pencil cone
+      var cw = wcur * 1.1, chh = cw * R(1.6, 2.4), cone = [[cx - cw / 2, y], [cx, y - chh], [cx + cw / 2, y]];
+      var cf = chance(0.55) ? "gold" : "blue";
+      c += body(cone) + wash(cone, cf === "gold" ? GOLD : BLUE) + pen(cone, { s: s, w: 0.6, col: cf === "gold" ? GOLD_INK : BLUE_INK });
+      c += finial(cx, y - chh, s, true);
+    }
+    return c;
+  }
+
+  function kasbah(cx, yb, s) {
+    var c = "", wb = R(30, 46) * s, h = R(80, 130) * s, wt = wb * 0.82, yt = yb - h;
+    var x0 = cx - wb / 2, x1 = cx + wb / 2, t0 = cx - wt / 2, t1 = cx + wt / 2;
+    var cr = R(9, 14) * s, tw = R(5, 8) * s; // corner turrets rising above the parapet
+    var prof = [[x0, yb + 3 * s], [t0, yt - cr], [t0 + tw, yt - cr], [t0 + tw, yt]];
+    var mer = roofProfile(t0 + tw, t1 - tw, yt, s, "crenel");
+    prof = prof.concat(mer, [[t1 - tw, yt], [t1 - tw, yt - cr], [t1, yt - cr], [x1, yb + 3 * s]]);
+    c += body(prof);
+    // decorative band: rows of triangles / zigzag under the parapet
+    var by0 = yt + 6 * s, by1 = yt + 15 * s;
+    var zz = [], n = Math.max(3, Math.floor(wt / (5 * s)));
+    for (var i = 0; i <= n; i++) zz.push([t0 + 1 + (wt - 2) * i / n, i % 2 ? by0 : by1]);
+    var tri = [];
+    for (i = 0; i < n; i += 2) tri.push(wash([zz[i], zz[i + 1] || zz[i], zz[i + 2] || zz[i]], GOLD_PALE));
+    c += tri.join("");
+    c += pen(zz, { s: s, w: 0.4, col: GOLD_INK });
+    c += pen([[t0 + 1, by0 - 1.5 * s], [t1 - 1, by0 - 1.5 * s]], { s: s, w: 0.35 });
+    c += pen([[t0 + 1, by1 + 1.5 * s], [t1 - 1, by1 + 1.5 * s]], { s: s, w: 0.35 });
+    // windows
+    var rows = Math.floor((h - 30 * s) / (20 * s));
+    for (var r = 0; r < rows; r++) {
+      var wy = by1 + 18 * s + r * 20 * s, ww = wb - (wb - wt) * (1 - (wy - yt) / h);
+      var nw = r % 2 ? 2 : 3;
+      for (var k = 0; k < nw; k++) c += windowAt(cx + (k - (nw - 1) / 2) * ww / (nw + 0.5), wy, s, r === 0 ? "twin" : pick(["slit", "square", "grille"]), chance(0.3) ? "blue" : "none");
+    }
+    if (chance(0.5)) c += doorAt(cx, yb, s * 1.1, pick(["blue", "gold", "none"]), "horseshoe");
+    c += pen(prof, { s: s, w: 0.8 });
+    // a few vertical shade strokes on the right flank
+    c += hatch(cx + wt * 0.3, yt + 18 * s, cx + wb * 0.45, yb - 4 * s, 3.2 * s, s, INK_FAR);
+    return c;
+  }
+
+  function palace(x0, yb, s) {
+    // two storeys with pointed arches and a balcony, plus a taller tower block with a grand arch
+    var c = "", w = R(90, 130) * s, h = R(60, 80) * s, x1 = x0 + w;
+    var tw = w * 0.42, th = h * R(1.2, 1.4), tx0 = chance(0.5) ? x1 - tw : x0, tx1 = tx0 + tw, yt = yb - h, tyt = yb - th;
+    var mainP = [[x0, yb + 3 * s], [x0, yt], [x1, yt], [x1, yb + 3 * s]];
+    var towP = [[tx0, yb + 3 * s], [tx0, tyt], [tx1, tyt], [tx1, yb + 3 * s]];
+    c += body(mainP) + body(towP);
+    var accA = chance(0.6) ? "gold" : "blue";
+    // main wing arches (avoid the tower)
+    var mx0 = tx0 === x0 ? tx1 : x0, mx1 = tx0 === x0 ? x1 : tx0, mw = mx1 - mx0, n = Math.max(2, Math.floor(mw / (16 * s)));
+    for (var fl = 0; fl < 2; fl++) {
+      var fy = yb - fl * h * 0.5 - 3 * s;
+      for (var i = 0; i < n; i++) {
+        var ax = mx0 + (i + 0.5) * mw / n, aw = mw / n * 0.55, ah = h * 0.36;
+        var outer = arch(ax, fy, aw + 4 * s, ah + 3 * s, "pointed");
+        if (fl === 0) { c += wash(outer, accA === "gold" ? GOLD_PALE : BLUE_PALE); c += lattice(ax - aw / 2 - 2 * s, fy - ah, ax + aw / 2 + 2 * s, fy, 2.4 * s, accA === "gold" ? GOLD_INK : BLUE_INK, s); }
+        c += wash(arch(ax, fy, aw, ah * 0.85, "pointed"), INK_FILL);
+        c += pen(outer, { s: s, w: 0.45 });
+      }
+      if (fl === 1) { // balcony rail
+        var ry = yb - h * 0.5 - 1 * s, rail = [];
+        for (var r = 0; r <= Math.floor(mw / (3 * s)); r++) { var rx = mx0 + r * 3 * s; rail.push(r % 2 ? [rx, ry - 6 * s] : [rx, ry], r % 2 ? [rx, ry] : [rx, ry - 6 * s]); }
+        c += pen(rail, { s: s, w: 0.3, j: 0.1 });
+        c += pen([[mx0 - 2 * s, ry], [mx1 + 2 * s, ry]], { s: s, w: 0.55 });
+        c += pen([[mx0 - 2 * s, ry - 6 * s], [mx1 + 2 * s, ry - 6 * s]], { s: s, w: 0.45 });
+      }
+    }
+    // parapet balustrade on top
+    var bp = [], ny = Math.floor(w / (4 * s));
+    for (var b = 0; b <= ny; b++) { var bx = x0 + b * w / ny; if (bx > tx0 && bx < tx1) continue; bp.push(pen([[bx, yt], [bx, yt - 4 * s]], { s: s, w: 0.3, j: 0.05 })); }
+    c += bp.join("") + pen([[x0, yt - 4 * s], [x1, yt - 4 * s]], { s: s, w: 0.45 });
+    // tower: grand arch with lattice panel, two windows above
+    var gcx = (tx0 + tx1) / 2, gw = tw * 0.62, gh = th * 0.48;
+    var gOuter = arch(gcx, yb, gw + 6 * s, gh + 5 * s, "pointed");
+    c += wash(gOuter, accA === "gold" ? GOLD_PALE : BLUE_PALE);
+    c += lattice(gcx - gw / 2 - 3 * s, yb - gh - 5 * s, gcx + gw / 2 + 3 * s, yb, 3 * s, accA === "gold" ? GOLD_INK : BLUE_INK, s);
+    c += wash(arch(gcx, yb, gw * 0.55, gh * 0.75, "pointed"), INK_FILL);
+    c += pen(gOuter, { s: s, w: 0.55 });
+    c += pen([[tx0, yb - gh - 9 * s], [tx1, yb - gh - 9 * s]], { s: s, w: 0.4 });
+    for (var t = -1; t <= 1; t += 2) c += windowAt(gcx + t * tw * 0.22, tyt + th * 0.3, s * 1.1, "pointed", "none");
+    c += pen(mainP, { s: s, w: 0.8 }) + pen(towP, { s: s, w: 0.8 });
+    var tb = [];
+    for (b = 0; b <= Math.floor(tw / (4 * s)); b++) tb.push(pen([[tx0 + b * 4 * s, tyt], [tx0 + b * 4 * s, tyt - 4 * s]], { s: s, w: 0.3, j: 0.05 }));
+    c += tb.join("") + pen([[tx0 - 1, tyt - 4 * s], [tx1 + 1, tyt - 4 * s]], { s: s, w: 0.45 });
+    return { c: c, w: w };
+  }
+
+  function palm(x, yb, s, o) {
+    o = o || {};
+    var c = "", h = (o.h || R(70, 120)) * s, lean = R(-0.25, 0.25) * h, trunk = [];
+    for (var i = 0; i <= 10; i++) { var t = i / 10; trunk.push([x + lean * t * t, yb - h * t]); }
+    var top = trunk[10];
+    // trunk: two edges + ring ticks, one body
+    var wb = 3.2 * s, wt = 1.8 * s, Lp = [], Rp = [];
+    for (i = 0; i <= 10; i++) { var ww = wb + (wt - wb) * i / 10; Lp.push([trunk[i][0] - ww, trunk[i][1]]); Rp.push([trunk[i][0] + ww, trunk[i][1]]); }
+    c += body(Lp.concat(Rp.slice().reverse()));
+    c += pen(Lp, { s: s, w: 0.5 }) + pen(Rp, { s: s, w: 0.5 });
+    var ticks = [];
+    for (i = 1; i < 20; i++) {
+      var tt = i / 20, px = x + lean * tt * tt, py = yb - h * tt, ww2 = wb + (wt - wb) * tt;
+      ticks.push(i % 2 ? [px - ww2, py] : [px + ww2, py - 1.5 * s], i % 2 ? [px + ww2, py - 1.5 * s] : [px - ww2, py]);
+    }
+    c += pen(ticks, { s: s, w: 0.25, col: INK_MID, j: 0.1, step: 3 });
+    // fronds: drooping arcs with leaflets
+    var nf = RI(6, 9), fr = "";
+    for (var f = 0; f < nf; f++) {
+      var ang = -Math.PI / 2 + (f / (nf - 1) - 0.5) * Math.PI * 1.5 + R(-0.15, 0.15), L = R(24, 38) * s, droop = R(0.5, 1.2);
+      var pts = [];
+      for (var k = 0; k <= 8; k++) {
+        var u = k / 8, a = ang + droop * u * u * Math.sign(Math.cos(ang) || 1);
+        pts.push([top[0] + Math.cos(ang) * L * u, top[1] + Math.sin(ang) * L * u + droop * L * 0.5 * u * u]);
+      }
+      var leaf = [];
+      for (k = 2; k < pts.length - 1; k += 1) {
+        var dx = pts[k + 1][0] - pts[k - 1][0], dy = pts[k + 1][1] - pts[k - 1][1], dl = Math.hypot(dx, dy) || 1;
+        var ll = (1 - k / pts.length) * 5.5 * s + 1.5 * s;
+        leaf.push(pts[k], [pts[k][0] - dy / dl * ll + dx / dl * ll * 0.7, pts[k][1] + dx / dl * ll + dy / dl * ll * 0.7], pts[k],
+          [pts[k][0] + dy / dl * ll + dx / dl * ll * 0.7, pts[k][1] - dx / dl * ll + dy / dl * ll * 0.7], pts[k]);
+      }
+      fr += pen(pts, { s: s, w: 0.55, taper: 3 });
+      fr += pen(leaf, { s: s, w: 0.28, j: 0.1, step: 2.5, taper: 4 });
+    }
+    c += fr;
+    if (chance(0.5)) { // date clusters
+      for (var d = 0; d < RI(1, 3); d++) c += wash(circ(top[0] + R(-4, 4) * s, top[1] + R(2, 5) * s, R(1.5, 2.5) * s, 8), GOLD);
+    }
+    return c;
+  }
+
+  function shrub(x, yb, s) { // spiky desert agave
+    var c = "", n = RI(5, 8), path = [];
+    for (var i = 0; i < n; i++) {
+      var a = -Math.PI / 2 + (i / (n - 1) - 0.5) * 2.4, L = R(5, 10) * s;
+      path.push([x, yb], [x + Math.cos(a) * L, yb + Math.sin(a) * L]);
+    }
+    path.push([x, yb]);
+    c += pen(path, { s: s, w: 0.4, step: 2.5, taper: 3 });
+    return c;
+  }
+
+  // ---------------- landscape layers ----------------
+  function ridge(x0, x1, base, amp, seed, freq) {
+    var p = [];
+    for (var x = x0; x <= x1; x += 8) {
+      var n = Noise.noise(x * freq, seed) * 0.75 + Noise.noise(x * freq * 4, seed + 3) * 0.25;
+      p.push([x, base - amp * n]);
+    }
+    return p;
+  }
+  function mountains(x0, x1) {
+    var c = "", far = ridge(x0 - 40, x1 + 40, 400, 220, 31.9, 0.0018);
+    c += pen(far, { w: 0.4, col: INK_FAR, j: 0.3 });
+    var p = ridge(x0 - 40, x1 + 40, 470, 330, 11.7, 0.0026);
+    c += body(p.concat([[x1 + 40, VIEW_H + 20], [x0 - 40, VIEW_H + 20]]));
+    c += pen(p, { w: 0.55, col: INK_MID, j: 0.3 });
+    // a secondary ridge line + slope hatching on east-facing slopes
+    var h = [];
+    for (var i = 1; i < p.length - 1; i++) {
+      var slope = p[i + 1][1] - p[i - 1][1];
+      if (slope > 2 && chance(0.55)) {
+        var len = R(12, 34) + slope * 2;
+        h.push(pen([[p[i][0], p[i][1] + 2], [p[i][0] - len * 0.35, p[i][1] + len]], { w: 0.3, col: INK_FAR, j: 0.2, taper: 3 }));
+      }
+    }
+    c += h.join("");
+    return c;
+  }
+  function farCity(x0, x1) { // hazy distant skyline: simple boxes, domes and towers in light ink
+    var c = "", base = R(455, 480), x = x0, prof = [[x0, base]];
+    while (x < x1) {
+      var w = R(10, 26), h = R(8, 22), roll = Math.random();
+      if (roll < 0.08) { var tw = R(4, 6), th = R(35, 60); prof.push([x, base - h], [x + 3, base - h], [x + 3, base - th], [x + 3 + tw / 2, base - th - 6], [x + 3 + tw, base - th], [x + 3 + tw, base - h], [x + w, base - h]); }
+      else if (roll < 0.2) { var r = w * 0.35; prof.push([x, base - h]); for (var k = 0; k <= 8; k++) { var a = Math.PI + Math.PI * k / 8; prof.push([x + w / 2 + Math.cos(a) * r, base - h + Math.sin(a) * r]); } prof.push([x + w, base - h]); }
+      else prof.push([x, base - h], [x + w, base - h]);
+      x += w;
+      prof.push([x, base - R(4, 8)]);
+    }
+    prof.push([x1, base]);
+    c += body(prof.concat([[x1, VIEW_H + 20], [x0, VIEW_H + 20]]));
+    c += pen(prof, { w: 0.4, col: INK_FAR, j: 0.2, step: 4 });
+    return c;
+  }
+  function dunes(x0, x1, base, seed) {
+    var c = "", p = ridge(x0 - 60, x1 + 60, base, 70, seed, 0.004);
+    c += body(p.concat([[x1 + 60, VIEW_H + 20], [x0 - 60, VIEW_H + 20]]));
+    c += pen(p, { w: 0.5, col: INK, j: 0.25 });
+    // a few ripple lines below the crest
+    for (var r = 0; r < 3; r++) {
+      var off = 12 + r * 14 + R(-3, 3), q = [], a = R(0.1, 0.4), b = a + R(0.25, 0.45);
+      for (var i = Math.floor(p.length * a); i < Math.floor(p.length * Math.min(1, b)); i++) q.push([p[i][0], p[i][1] + off + Math.sin(i * 0.4 + r) * 2]);
+      if (q.length > 3) c += pen(q, { w: 0.3, col: INK_FAR, j: 0.2 });
+    }
+    return c;
+  }
+  function sun(x, y, moon) {
+    var c = "", r = R(26, 40);
+    if (moon) {
+      c += crescent(x, y, r, 6);
+      for (var i = 0; i < RI(4, 9); i++) c += star(x + R(-220, 220), R(25, 190), R(2.5, 4.5));
+    } else {
+      var p = circ(x, y, r, 40);
+      c += wash(p, GOLD_PALE) + pen(closed(p), { w: 0.5, col: GOLD_INK, j: 0.1 });
+      var rays = [];
+      for (var k = 0; k < 16; k++) { var a = k / 16 * Math.PI * 2; rays.push(pen([[x + Math.cos(a) * (r + 6), y + Math.sin(a) * (r + 6)], [x + Math.cos(a) * (r + (k % 2 ? 12 : 18)), y + Math.sin(a) * (r + (k % 2 ? 12 : 18))]], { w: 0.4, col: GOLD_INK, j: 0.1, taper: 2 })); }
+      c += rays.join("");
+    }
+    return c;
+  }
+  function star(x, y, r) {
+    var p = [];
+    for (var k = 0; k < 8; k++) { var a = k / 8 * Math.PI * 2 - Math.PI / 2, rr = k % 2 ? r * 0.38 : r; p.push([x + Math.cos(a) * rr, y + Math.sin(a) * rr]); }
+    return wash(p, GOLD);
+  }
+  function birds(x, y) {
+    var c = "", n = RI(3, 7);
+    for (var i = 0; i < n; i++) {
+      var bx = x + R(-50, 50), by = y + R(-20, 20), w = R(3, 5.5);
+      c += pen([[bx - w, by - w * 0.5], [bx - w * 0.4, by - w * 0.15], [bx, by + w * 0.2], [bx + w * 0.4, by - w * 0.15], [bx + w, by - w * 0.5]], { w: 0.35, step: 1.5, taper: 3, j: 0.05 });
+    }
+    return c;
+  }
+  function cloud(x, y) { // a curling cloud band
+    var c = "", L = R(80, 160), p = [];
+    for (var i = 0; i <= 30; i++) { var t = i / 30; p.push([x + L * t, y + Math.sin(t * Math.PI * 3) * 3]); }
+    var cur = [], r = 7;
+    for (i = 0; i <= 16; i++) { var a = Math.PI / 2 + i / 16 * Math.PI * 1.6; cur.push([x + L + Math.cos(a) * r * (1 - i / 30), y - r + Math.sin(a) * r * (1 - i / 30)]); }
+    c += pen(p.concat(cur.reverse()), { w: 0.35, col: BLUE_INK, j: 0.15, taper: 4 });
+    var q = [];
+    for (i = 0; i <= 20; i++) { var t2 = i / 20; q.push([x + 15 + (L - 30) * t2, y + 7 + Math.sin(t2 * Math.PI * 2) * 2]); }
+    c += pen(q, { w: 0.28, col: BLUE_INK, j: 0.15, taper: 4 });
+    return c;
+  }
+  function wallGate(x0, x1, s) {
+    var c = "", yb = VIEW_H + 20, yt = 652 + R(-6, 6), gx = chance(0.7) ? x0 + (x1 - x0) * R(0.3, 0.7) : null;
+    var prof = roofProfile(x0, x1, yt, 1, "crenel");
+    var out = [[x0, yb]].concat(prof, [[x1, yb]]);
+    c += body(out);
+    // stone courses
+    var co = [];
+    for (var y = yt + 9; y < VIEW_H; y += 9) co.push(pen([[x0 + 2, y + R(-1, 1)], [x1 - 2, y + R(-1, 1)]], { w: 0.22, col: INK_FAR, j: 0.4 }));
+    c += co.join("");
+    if (gx != null) { // gate bastion with a big horseshoe arch and blue tile surround
+      var gw = 70, gt = yt - 22, gp = roofProfile(gx - gw / 2, gx + gw / 2, gt, 1, "crenel");
+      var go = [[gx - gw / 2, yb]].concat(gp, [[gx + gw / 2, yb]]);
+      c += body(go);
+      var ao = arch(gx, VIEW_H + 4, 38, 52, "horseshoe");
+      var surround = rect(gx - 27, VIEW_H + 4 - 66, gx + 27, VIEW_H + 4);
+      c += wash(surround, BLUE_PALE);
+      c += lattice(surround[0][0], surround[0][1], surround[1][0], surround[2][1], 4, BLUE_INK, 1);
+      c += body(scaleAbout(ao, gx, VIEW_H + 4, 1.12).concat([[gx + 22, VIEW_H + 4]]));
+      c += wash(scaleAbout(ao, gx, VIEW_H + 4, 1.12), GOLD_PALE);
+      c += wash(ao, INK_FILL);
+      c += pen(scaleAbout(ao, gx, VIEW_H + 4, 1.12), { w: 0.55, col: GOLD_INK });
+      c += pen(closed(surround).slice(0, -1), { w: 0.5 });
+      c += pen(go, { w: 0.85 });
+    }
+    c += pen(out, { w: 0.85 });
+    return c;
+  }
+
+  // ---------------- planner ----------------
+  // city height above the ground at x (0 = open desert)
+  function cityH(x) {
+    var n = Noise.noise(x * 0.0011, 3.1) * 0.8 + Noise.noise(x * 0.004, 9.4) * 0.2;
+    return Math.max(0, Math.min(1, (n - 0.3) * 3)) * (NROWS - 1) * ROW_DY;
+  }
+  var PLAN;
+  function resetPlan() { PLAN = { cursor: [], lastMinaret: -1e9, lastPalace: -1e9, lastSky: -1e9, wallTo: -1e9 }; }
+  resetPlan();
+
+  function planChunk(xmin, xmax, add) {
+    var r, x;
+    // sky + distance
+    add("mountains", xmin, -3000, mountains(xmin, xmax));
+    add("farcity", xmin, -2500, farCity(xmin, xmax));
+    if (xmin - PLAN.lastSky > R(1400, 2600)) {
+      PLAN.lastSky = xmin;
+      add("sky", xmin, -5000, sun(xmin + R(80, 430), R(70, 140), chance(0.55)));
+    }
+    if (chance(0.35)) add("sky", xmin, -4900, birds(xmin + R(50, 460), R(60, 200)));
+    if (chance(0.45)) add("sky", xmin, -4800, cloud(xmin + R(0, 380), R(40, 170)));
+    // open-desert dunes where the city thins out (midground)
+    var hMid = cityH((xmin + xmax) / 2);
+    if (hMid < 3 * ROW_DY) {
+      add("dunes", xmin, 520, dunes(xmin, xmax, 610 - R(0, 30), 21.3 + xmin * 0.001));
+      for (x = xmin + R(0, 120); x < xmax; x += R(90, 260)) add("shrub", x, 640, shrub(x, R(630, 690), 1));
+    }
+    // rows of buildings, back to front
+    for (r = NROWS - 1; r >= 0; r--) {
+      var yb = GROUND - r * ROW_DY, s = SCALE * (0.8 + 0.34 * (yb - (GROUND - (NROWS - 1) * ROW_DY)) / ((NROWS - 1) * ROW_DY));
+      x = PLAN.cursor[r] == null ? xmin - R(0, 40) : PLAN.cursor[r];
+      while (x < xmax) {
+        var w = R(36, 92) * s, cx = x + w / 2, need = GROUND - yb;
+        var key = yb + R(-3, 3);
+        if (cityH(cx) < need) { // beyond the hill: occasional palms or a lone house on the slope
+          if (r <= 2 && chance(0.12)) add("palm", cx, key, palm(cx, yb - R(0, 20), s));
+          x += w + R(10, 60) * s;
+          continue;
+        }
+        var top = r >= 1 && cityH(cx) - need < ROW_DY * 1.2; // on the skyline
+        var roll = Math.random();
+        if (cx - PLAN.lastMinaret > 650 && r >= 2 && roll < 0.08) {
+          PLAN.lastMinaret = cx;
+          add("minaret", cx, key + 1, minaret(cx, yb, s));
+          x += R(16, 24) * s + 2;
+          continue;
+        }
+        if (roll < 0.065) { add("mosque", cx, key, mosque(x, yb, Math.max(w, 70 * s), R(30, 50) * s, s)); x += Math.max(w, 70 * s) + R(0, 4) * s; continue; }
+        if ((top || r >= 6) && roll < 0.12) { var kw = R(30, 46) * s; add("kasbah", x + kw / 2, key, kasbah(x + kw / 2, yb, s)); x += kw + R(0, 5) * s; continue; }
+        if (r <= 3 && cx - PLAN.lastPalace > 900 && roll < 0.16) { PLAN.lastPalace = cx; var pal = palace(x, yb, s); add("palace", cx, key, pal.c); x += pal.w + R(2, 8) * s; continue; }
+        if (roll < 0.2 && r <= 5) { add("palm", cx, key - 6, palm(cx, yb - R(4, 14) * s, s)); x += R(10, 22) * s; continue; }
+        var h = R(40, 105) * s * (top ? 0.9 : 1);
+        add("house", cx, key, house(x, yb, w, h, s));
+        x += w + R(-3, 4) * s;
+      }
+      PLAN.cursor[r] = x;
+    }
+    // foreground: city wall with a gate, or desert palms
+    if (xmin > PLAN.wallTo && cityH((xmin + xmax) / 2) > 2 * ROW_DY && chance(0.3)) {
+      var wl = R(350, 750);
+      PLAN.wallTo = xmin + wl;
+      add("wall", xmin, 760, wallGate(xmin + R(0, 100), xmin + wl, 1));
+    }
+    if (hMid < 3 * ROW_DY && chance(0.6)) {
+      var px = xmin + R(40, 470), n = RI(1, 4);
+      for (var i = 0; i < n; i++) { var ppx = px + R(-50, 50); add("palm", ppx, 740 + i, palm(ppx, R(690, 715), 1.25, { h: R(120, 220) })); }
+    }
+  }
+
+  MEM = { chunks: [], xmin: 0, xmax: 0, cwid: 512, planmtx: [] };
+
+  function chunkloader(xmin, xmax) {
+    function add(tag, x, y, canv) {
+      if (!canv) return;
+      if (canv.indexOf("NaN") >= 0) canv = canv.replace(/NaN/g, -1000);
+      var nch = { tag: tag, x: x, y: y, canv: canv }, C = MEM.chunks;
+      var j = C.length;
+      while (j > 0 && C[j - 1].y > y) j--;
+      C.splice(j, 0, nch);
+    }
+    if (MEM.xmax === 0 && MEM.xmin === 0 && !MEM.planmtx.started) { resetPlan(); MEM.planmtx.started = true; }
+    while (xmax > MEM.xmax - MEM.cwid) {
+      planChunk(MEM.xmax, MEM.xmax + MEM.cwid, add);
+      MEM.xmax += MEM.cwid;
+    }
+  }
