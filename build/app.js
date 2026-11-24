@@ -1,4 +1,4 @@
-/* Medina Drawing — engine (shared with Mountain Drawing / Shan Shui Swarm).
+/* Medina Drawing — engine. (c) 2026 laith-droid, MIT License (see LICENSE).
  * City generation: build/medina-lib.js (written for this project; PRNG + noise from shan-shui-inf, MIT),
  * wrapped in SHANSHUI_LIB. The generator's SVG is never shown. PARSE_CHUNK turns each object into ordered primitives
  * (brush ribbons, lines, outlines, washes); brushes trace each primitive's own path and the ink
