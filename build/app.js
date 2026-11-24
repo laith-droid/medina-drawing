@@ -336,6 +336,7 @@ function DRIVER(L, PARSE, VISF, VIEW_H, SAFE) {
         var o = j.items[j.open[k]];
         if (o.s === 2 && depsMet(j, o)) {
           drawScratch(j.lctx, o);
+          if (COMPOSITE && o.sc) landed.push({ sc: o.sc, ox: o.ox, oy: o.oy }); // shown on top until the next composite
           o.s = 3; o.sc = o.tr = o.cum = null;
           j.open.splice(k, 1); k--;
           j.left--; S.strokes++;
@@ -559,28 +560,76 @@ function DRIVER(L, PARSE, VISF, VIEW_H, SAFE) {
   }
 
   // ---------------- drawing ----------------
+  // Finished artwork (tiles + object layers) is merged into one composite image a few times a second; each frame
+  // only draws that image at the camera offset, plus strokes landed since the merge and strokes in flight.
+  // Redrawing ~120 layers + tiles every frame held a Fire TV Stick 4K (PowerVR GE9215) to ~7 fps. ?composite=0 = old path.
+  var COMPOSITE = true, COMP_DT = 125, COMP_M = 96, comp = null, landed = [];
+  try { COMPOSITE = new URLSearchParams(location.search).get("composite") !== "0"; } catch (e) {}
+  function sortedLayers() {
+    return S.jobs.filter(function (j) { return (j.state === "live" || j.state === "done") && j.layer; })
+      .sort(function (a, b) { return before(a, b) ? -1 : 1; });
+  }
+  function rebuildComposite(now) {
+    var x0 = S.camX - COMP_M, w = viewW + 2 * COMP_M;
+    var cw = Math.ceil(w * TS), ch = Math.ceil(VIEW_H * TS);
+    if (!comp || comp.cv.width !== cw || comp.cv.height !== ch) {
+      var cv = document.createElement("canvas"); cv.width = cw; cv.height = ch;
+      comp = { cv: cv, ctx: cv.getContext("2d") };
+    }
+    var c = comp.ctx;
+    c.setTransform(1, 0, 0, 1, 0, 0);
+    c.clearRect(0, 0, cw, ch);
+    S.tiles.forEach(function (t) {
+      if (t.x0 + TILE_W < x0 || t.x0 > x0 + w) return;
+      c.drawImage(t.cv, (t.x0 - x0) * TS, 0);
+    });
+    var layers = sortedLayers();
+    for (var k = 0; k < layers.length; k++) {
+      var j = layers[k];
+      if (j.lx0 > x0 + w || j.lx0 + j.layer.width / TS < x0) continue;
+      c.drawImage(j.layer, (j.lx0 - x0) * TS, j.ly0 * TS);
+    }
+    comp.x0 = x0; comp.w = w; comp.t = now; comp.S = S;
+    landed = [];
+  }
   function drawInk() {
     var c = inkCtx;
     c.setTransform(1, 0, 0, 1, 0, 0);
     c.clearRect(0, 0, inkCv.width, inkCv.height);
-    var sc = Vd / TS;
+    var sc = Vd / TS, k, j, i, it;
+    if (COMPOSITE) {
+      var now = performance.now();
+      if (!comp || comp.S !== S || now - comp.t > COMP_DT || S.camX < comp.x0 + 4 || S.camX + viewW > comp.x0 + comp.w - 4) rebuildComposite(now);
+      c.drawImage(comp.cv, (comp.x0 - S.camX) * Vd, 0, comp.cv.width * sc, comp.cv.height * sc);
+      c.setTransform(Vd, 0, 0, Vd, -S.camX * Vd, 0);
+      for (k = 0; k < landed.length; k++) { var l = landed[k]; c.drawImage(l.sc, l.ox, l.oy, l.sc.width / TS, l.sc.height / TS); }
+      for (k = 0; k < S.jobs.length; k++) {
+        j = S.jobs[k];
+        if (j.state !== "live" || !j.open.length) continue;
+        for (i = 0; i < j.open.length; i++) {
+          it = j.items[j.open[i]];
+          if (it.s === 1) paintPartial(c, j, it);
+          else if (it.s === 2) drawScratch(c, it);
+        }
+      }
+      return;
+    }
     S.tiles.forEach(function (t) {
       var x = (t.x0 - S.camX) * Vd;
       if (x > inkCv.width || x + TILE_W * Vd < 0) return;
       c.drawImage(t.cv, x, 0, t.cv.width * sc, t.cv.height * sc);
     });
-    var layers = S.jobs.filter(function (j) { return (j.state === "live" || j.state === "done") && j.layer; })
-      .sort(function (a, b) { return before(a, b) ? -1 : 1; });
-    for (var k = 0; k < layers.length; k++) {
-      var j = layers[k];
+    var layers = sortedLayers();
+    for (k = 0; k < layers.length; k++) {
+      j = layers[k];
       if ((j.lx0 - S.camX) * Vd > inkCv.width || (j.lx0 + j.layer.width / TS - S.camX) * Vd < 0) continue;
       c.setTransform(1, 0, 0, 1, 0, 0);
       c.drawImage(j.layer, (j.lx0 - S.camX) * Vd, j.ly0 * Vd, j.layer.width * sc, j.layer.height * sc);
       if (j.state !== "live" || !j.open.length) continue;
       // strokes in flight, in the object's own drawing order
       c.setTransform(Vd, 0, 0, Vd, -S.camX * Vd, 0);
-      for (var i = 0; i < j.open.length; i++) {
-        var it = j.items[j.open[i]];
+      for (i = 0; i < j.open.length; i++) {
+        it = j.items[j.open[i]];
         if (it.s === 1) paintPartial(c, j, it);
         else if (it.s === 2) drawScratch(c, it);
       }
@@ -665,6 +714,7 @@ function DRIVER(L, PARSE, VISF, VIEW_H, SAFE) {
     if (gen) gen.kill();
     gen = makeGenerator();
     S = freshState(seed);
+    comp = null; landed = [];
     brushes = [];
     for (var i = 0; i < BRUSHES; i++) brushes.push(makeBrush(i));
     document.getElementById("seed").textContent = seed;
